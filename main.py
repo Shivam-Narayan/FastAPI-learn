@@ -1,96 +1,100 @@
-from fastapi import  Depends, FastAPI
+import os
+import uvicorn
+from typing import Optional
+from dotenv import load_dotenv
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import session
-from models import Product
-from database import Session, engine
-import database_models
+from logger import configure_logging
+from routes.route_handler import all_routers
+from utils.middleware import AuthMiddleware
+from __init__ import __version__
+from db_pool import Base, engine
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["*"]
-)
-
-database_models.Base.metadata.create_all(bind=engine)
+load_dotenv()
 
 
-@app.get("/")
-def greet():
-    return "Welcome to FastAPI"
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application."""
+    app = FastAPI(
+        title="fastAPI",
+        description="API and routes available in backend",
+        version=__version__,
+    )
+
+    # Add Auth middleware (class-based)
+    app.add_middleware(AuthMiddleware)
+
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Include all routes
+    all_routers(app)
+
+    # Startup event
+    @app.on_event("startup")
+    def startup_event():
+        logger = configure_logging(__name__)
+        logger.info("Logger is configured.")
+        
+        # Create all tables
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("Database tables created.")
+        except Exception as e:
+            logger.error(f"Failed to create database tables: {e}")
+            logger.warning("Continuing without database. Make sure PostgreSQL is running.")
+
+        # Create data directory for attachment-worker service
+        if os.getenv("SERVICE_TYPE") == "attachment-worker":
+            os.makedirs("data", exist_ok=True)
+
+    # Shutdown event
+    @app.on_event("shutdown")
+    def shutdown_event():
+        logger = configure_logging(__name__)
+        logger.info("Server is shutting down.")
+
+    # Root endpoint
+    @app.get("/")
+    async def root():
+        return {"message": "App API is running"}
+
+    # Health check endpoint
+    @app.get("/health")
+    async def health_check():
+        return {"status": "ok"}
+
+    # Favicon endpoint
+    @app.get("/favicon.ico")
+    async def favicon():
+        pass
+
+    return app
 
 
-products = [
-    Product(id=1, name="phone", description="budget phone", price=99, quantity=10),
-    Product(id=2, name="laptop", description="entry-level laptop", price=499, quantity=5),
-    Product(id=3, name="headphones", description="wireless over-ear headphones", price=79, quantity=25),
-    Product(id=4, name="smartwatch", description="fitness smartwatch", price=129, quantity=15),
-    Product(id=5, name="tablet", description="compact android tablet", price=199, quantity=8),
-    Product(id=6, name="charger", description="fast USB-C charger", price=29, quantity=40),
-]
-
-def get_db():
-    db = Session()
-    try:
-        yield db
-    finally:
-        db.close()    
-
-def init_db():
-    db = Session()
-    count = db.query(database_models.Product).count
-
-    if count == 0:
-
-        for product in products:
-            db.add(database_models.Product(**product.model_dump()))
-
-        db.commit()
-
-init_db()
-
-@app.get("/products")
-def get_all_products(db: session = Depends(get_db)):
-    db_products = db.query(database_models.Product).all()
-
-    return db_products
+# Create FastAPI app
+app = create_app()
 
 
-@app.get("/products/{id}")
-def get_product_by_id(id: int, db: session = Depends(get_db)):
-    db_product = db.query(database_models.Product).filter(database_models.Product.id == id).first()
-    if db_product:
-         return db_product
-    return "product not found"
+def start_server(host: Optional[str] = None, port: Optional[int] = None):
+    """Start the server."""
+    uvicorn.run(
+        "main:app",
+        host=host or "0.0.0.0",
+        port=port or 8000,
+        reload=True,
+        timeout_keep_alive=120,
+        limit_concurrency=1000,
+        limit_max_requests=10000,
+        h11_max_incomplete_event_size=4194304,
+    )
 
 
-@app.post("/products")
-def add_product(product: Product, db: session = Depends(get_db)):
-    db.add(database_models.Product(**product.model_dump()))
-    db.commit()
-    return product
-
-
-@app.put("/product/{id}")
-def update_product(id: int, product: Product, db: session = Depends(get_db)):
-    db_product = db.query(database_models.Product).filter(database_models.Product.id == id).first()
-    if db_product:
-        db_product.name = product.name
-        db_product.description = product.description
-        db_product.price = product.price
-        db_product.quantity = product.quantity
-        db.commit()
-        return "Product Updated"
-    else: 
-        return "No product found"
-
-
-@app.delete("/product/{id}")
-def delete_product(id: int, db: session = Depends(get_db)):
-    db_product = db.query(database_models.Product).filter(database_models.Product.id == id).first()
-    if db_product:
-        db.delete(db_product)
-        db.commit()
-    else:
-        return "Product not found"
+if __name__ == "__main__":
+    start_server()
