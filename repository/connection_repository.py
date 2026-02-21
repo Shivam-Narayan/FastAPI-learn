@@ -3,12 +3,12 @@ from logger import configure_logging
 from models.connection import Connection
 
 # Default libraries
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 
 # Installed libraries
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,8 +50,46 @@ class ConnectionRepository:
                     Connection.deleted_at.is_(None)
                 )
             )
-            connection = result.scalar_one_or_none()
-            return connection
+            return result.scalar_one_or_none()
         except SQLAlchemyError as e:
             logger.error(f"SQLAlchemy Error while fetching Connection: {e}")
             return None
+
+    async def list_connections(self) -> List[Connection]:
+        try:
+            result = await self.db.execute(
+                select(Connection).filter(Connection.deleted_at.is_(None))
+            )
+            return result.scalars().all()
+        except SQLAlchemyError as e:
+            logger.error(f"SQLAlchemy Error while listing connections: {e}")
+            return []
+
+    async def update_connection(self, connection_id: UUID, updates: dict) -> Optional[Connection]:
+        conn = await self.get_connection_by_id(connection_id)
+        if not conn:
+            return None
+        try:
+            for k, v in updates.items():
+                if hasattr(conn, k) and k != 'id':
+                    setattr(conn, k, v)
+            await self.db.commit()
+            await self.db.refresh(conn)
+            return conn
+        except SQLAlchemyError as e:
+            await self.db.rollback()
+            logger.error(f"SQLAlchemy Error while updating Connection: {e}")
+            return None
+
+    async def soft_delete_connection(self, connection_id: UUID) -> bool:
+        conn = await self.get_connection_by_id(connection_id)
+        if not conn:
+            return False
+        try:
+            conn.deleted_at = func.now()
+            await self.db.commit()
+            return True
+        except SQLAlchemyError as e:
+            await self.db.rollback()
+            logger.error(f"SQLAlchemy Error while deleting Connection: {e}")
+            return False

@@ -19,7 +19,7 @@ class ConnectionBase(BaseModel):
     encrypted_credentials: str = Field(..., min_length=1)
     encrypted_token: Optional[str] = None
     connection_config: Optional[Dict[str, Any]] = None
-    connection_metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
     is_active: bool = True
     auth_status: str = Field(default="valid", max_length=32)
     created_by: Optional[UUID] = None
@@ -59,7 +59,7 @@ class ConnectionUpdate(BaseModel):
     encrypted_credentials: Optional[str] = Field(None, min_length=1)
     encrypted_token: Optional[str] = None
     connection_config: Optional[Dict[str, Any]] = None
-    connection_metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
     auth_status: Optional[str] = Field(None, max_length=32)
 
