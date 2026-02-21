@@ -5,10 +5,12 @@ from db_pool import DatabasePoolManager
 # Database modules
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, text
+# async imports
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 # Default Libraries
 from contextlib import contextmanager
-from typing import Generator, List, Optional, Union
+from typing import Generator, AsyncGenerator, List, Optional, Union
 from uuid import UUID
 import os
 import re
@@ -163,6 +165,77 @@ def get_schema_db(token: Optional[str] = Depends(oauth2_scheme),) -> Generator[S
         raise
     except Exception as e:
         logger.error(f"Error in get_schema_db dependency: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error in database connection")
+
+
+# --- ASYNC helpers --------------------------------------------------
+
+# create an async session factory cache keyed by schema name
+_async_session_factories: dict[str, async_sessionmaker[AsyncSession]] = {}
+
+
+def _get_async_session_factory(schema_name: str):
+    """Return (and create if necessary) an async_sessionmaker bound to the given schema."""
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+    if schema_name not in _async_session_factories:
+        # convert sync DATABASE_URL to async+asyncpg driver
+        url = os.getenv("DATABASE_URL")
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        engine = create_async_engine(url, future=True)
+
+        # ensure the schema search path is set at session start
+        def on_connect(dbapi_connection, connection_record):
+            # sync event handler invoked on each new connection
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute(f"SET search_path TO '{schema_name}'")
+            finally:
+                cursor.close()
+
+        # SQLAlchemy async engines expose sync engine for events
+        from sqlalchemy import event
+        event.listen(engine.sync_engine, "connect", on_connect)
+
+        _async_session_factories[schema_name] = async_sessionmaker(bind=engine, expire_on_commit=False)
+    return _async_session_factories[schema_name]
+
+
+async def get_async_schema_db(token: Optional[str] = Depends(oauth2_scheme)) -> AsyncGenerator[AsyncSession, None]:
+    """Async dependency to provide an AsyncSession scoped to a tenant schema."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    try:
+        schema_name = "public"
+
+        if token:
+            jwt_secret = os.getenv("JWT_SECRET")
+            if not jwt_secret:
+                raise HTTPException(status_code=500, detail="JWT secret not configured")
+            try:
+                decoded_token = decode(token, jwt_secret, algorithms=["HS256"])
+                schema_name = decoded_token.get("org_id", "public")
+            except Exception as e:
+                logger.error(f"Error decoding JWT token: {e}")
+                raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+            if not check_schema_exists(schema_name):
+                logger.warning(f"Schema '{schema_name}' does not exist. Defaulting to 'public'.")
+                raise HTTPException(status_code=404, detail=f"Schema '{schema_name}' not found")
+
+        session_factory = _get_async_session_factory(schema_name)
+        async with session_factory() as session:
+            # ensure search path is set (redundant with connect hook but safe)
+            await session.execute(text(f"SET search_path TO '{schema_name}'"))
+            yield session
+
+    except HTTPException:
+        raise
+    except RequestValidationError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_async_schema_db dependency: {e}")
         raise HTTPException(status_code=500, detail="Internal server error in database connection")
     
 @contextmanager
